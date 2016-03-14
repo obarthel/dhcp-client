@@ -315,6 +315,7 @@ print_dhcp_server_data(void)
 
 		printf("time-received=%s:%s%s\n",date_time_string,microsecond_string,time_zone_string);
 
+		/* General response information. */
 		for(kvn = (struct kv_node *)get_list_head(&data->dhcp_response) ;
 			kvn != NULL ;
 			kvn = (struct kv_node *)get_next_node(&kvn->node))
@@ -322,14 +323,12 @@ print_dhcp_server_data(void)
 			printf("%s=%s\n",kvn->key,kvn->value);
 		}
 
-		if(!is_list_empty(&data->dhcp_option))
+		/* BOOTP/DHCP options. */
+		for(kvn = (struct kv_node *)get_list_head(&data->dhcp_option) ;
+			kvn != NULL ;
+			kvn = (struct kv_node *)get_next_node(&kvn->node))
 		{
-			for(kvn = (struct kv_node *)get_list_head(&data->dhcp_option) ;
-				kvn != NULL ;
-				kvn = (struct kv_node *)get_next_node(&kvn->node))
-			{
-				printf("option-%s=%s\n",kvn->key,kvn->value);
-			}
+			printf("option-%s=%s\n",kvn->key,kvn->value);
 		}
 
 		printed = true;
@@ -1117,7 +1116,7 @@ dhcp_input(const struct ether_header * eframe,
 	if(text_buffer[0] != '\0')
 		add_dhcp_response(server_data,"boot-file-name","\"%s\"",text_buffer);
 
-	/* Process the BOOTP/DHCP options and print information for
+	/* Process the BOOTP/DHCP options and print information for a
 	 * selection of options.
 	 */
 	for(pos = 0 ; pos < vendor_options_length ; (void)NULL)
