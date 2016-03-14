@@ -3,7 +3,7 @@ find-dhcp-servers
 
 This is a tool for detecting **rogue DHCP servers** in the local network, such as you might accidentally unleash when you start a virtual machine on your development machine or when you set up a new server in your network.
 
-`find-dhcp-servers` works by sending a DHCP "discover" message, waits for DHCP server responses to trickle in and collects these responses. The responses can be printed or you can use `find-dhcp-servers` in shell scripts to notify you if more than one DHCP server was found.
+`find-dhcp-servers` works by sending a DHCP "discover" message, waits for DHCP server responses to trickle in and collects these responses. The responses can be printed or you can use `find-dhcp-servers` in shell scripts to notify you if more than one DHCP server was found (the "extra" servers being the rogues).
 
 `find-dhcp-servers` was tested successfully on Linux, FreeBSD and Mac OS X systems.
 
@@ -116,7 +116,7 @@ In order to build the `find-dhcp-servers` command enter `make` in the shell. It 
 
 `find-dhcp-servers` was built on top of Samuel Jacob's "Simple DHCP client" -- thank you very much!
 
-The numerous changes and additions I made to the code came about because I had no luck at all to find a [suitable scapy version](http://www.secdev.org/projects/scapy/), a modern version of [nmap](https://nmap.org) or a simple script wrapper for [tcpdump](http://www.tcpdump.org) which would help me to diagnose a network problem on three different servers. The servers in question were either too old to run the Scapy or did not support NMAP 6.0.
+The numerous changes and additions I made to the code came about because I had no luck at all to find a [suitable scapy version](http://www.secdev.org/projects/scapy/), a modern version of [nmap](https://nmap.org) or a simple script wrapper for [tcpdump](http://www.tcpdump.org) which would help me to diagnose a network problem on three different servers. The servers in question were either too old to run Scapy (for lack of Python 2.7) or did not support NMAP 6.0.
 
 But, hey, I have been programming 'C' since 1987, and I have been writing DHCP client software before ;-)
 
