@@ -106,13 +106,45 @@ You can provide the name of the network interface which the DHCP discover messag
 
 The network interface name is an optional parameter, which means that if you omit it, then a default interface name will be used instead which is suitable to sending and receiving DHCP messages. If in doubt, do specify the exact network interface name you want to use because the automatically chosen default name might not be what you expected.
 
-## 3. Building & dependencies
+## 3. Which DHCP options are supported and requested?
+
+* (0) Pad (RFC 1395)
+* (1) Subnet mask (RFC 1395)
+* (3) Gateway (RFC 1395)
+* (6) Domain name system server (RFC 1395)
+* (15) Domain name (RFC 1395)
+* (26) Interface MTU (RFC 1533)
+* (28) Broadcast address (RFC 1533)
+* (31) Perform router discovery (RFC 1533)
+* (33) Static route (RFC 1533)
+* (42) Network time protocol servers (RFC 1533)
+* (44) NetBIOS over TCP/IP name server (RFC 1533)
+* (46) NetBIOS over TCP/IP node type (RFC 1533)
+* (47) NetBIOS over TCP/IP scope (RFC 1533)
+* (51) IP address lease time (RFC 1533)
+* (53) DHCP message type (RFC 1533)
+* (54) Server identifier (RFC 1533)
+* (55) Parameter request list (RFC 1533)
+* (56) Message (RFC 1533)
+* (57) Maximum DHCP message size (RFC 1533)
+* (58) Renewal (T1) time value (RFC 1533)
+* (59) Rebinding (T1) time value (RFC 1533)
+* (95) LDAP URL (RFC draft)
+* (116) Auto configure (RFC 2563)
+* (119) Domain search (RFC 3397)
+* (121) Classless static route (RFC 3442)
+* (252) Web proxy autodiscovery (RFC draft)
+* (255) End (RFC 1395)
+
+With the exception of the Pad and End options (which have no data attached), the option data provided by the DHCP server will be decoded and printed.
+
+## 4. Building & dependencies
 
 `find-dhcp-servers` is written in the 'C' programming language and requires C99 support in the compiler/runtime library. It uses [libpcap](http://www.tcpdump.org) to send and receive DHCP messages. It should compile fine with GCC and clang.
 
 In order to build the `find-dhcp-servers` command enter `make` in the shell. It should build cleanly both under Linux, FreeBSD and Mac OS X.
 
-## 4. History
+## 5. History
 
 `find-dhcp-servers` was built on top of Samuel Jacob's "Simple DHCP client" -- thank you very much!
 
