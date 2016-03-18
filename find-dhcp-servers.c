@@ -156,9 +156,11 @@ enum
 	OPTION_TYPE_IP_ADDRESS_LEASE_TIME=51,
 	OPTION_TYPE_DHCP_MESSAGE_TYPE=53,
 	OPTION_TYPE_SERVER_IDENTIFIER=54,
-	OPTION_TYPE_MAXIMUM_DHCP_MESSAGE_SIZE=57,
 	OPTION_TYPE_PARAMETER_REQUEST_LIST=55,
 	OPTION_TYPE_MESSAGE=56,
+	OPTION_TYPE_MAXIMUM_DHCP_MESSAGE_SIZE=57,
+	OPTION_TYPE_RENEWAL_TIME=58,
+	OPTION_TYPE_REBINDING_TIME=59,
 	OPTION_TYPE_LDAP_URL=95,
 	OPTION_TYPE_AUTO_CONFIGURE=116,
 	OPTION_TYPE_DOMAIN_SEARCH=119,
@@ -958,6 +960,43 @@ out:
 
 /****************************************************************************/
 
+/* Convert the number of seconds given for lease time and renewal/rebinding
+ * interval into more than just a single number, detailing minutes/hours/days.
+ */
+static void
+convert_seconds_to_readable_form(uint32_t seconds,char * buffer,size_t buffer_size)
+{
+	if(seconds < 60)
+	{
+		assert( buffer_size > 0 );
+		
+		strcpy(buffer,"");
+	}
+	else if (seconds < 60 * 60)
+	{
+		snprintf(buffer,buffer_size," (%u:%02u minutes)",
+			seconds / 60,
+			seconds % 60);
+	}
+	else if (seconds < 24 * 60 * 60)
+	{
+		snprintf(buffer,buffer_size," (%u:%02u:%02u hours)",
+			seconds / (60 * 60),
+			(seconds / 60) % 60,
+			seconds % 60);
+	}
+	else
+	{
+		snprintf(buffer,buffer_size," (%u:%02u:%02u:%02u days)",
+			seconds / (24 * 60 * 60),
+			(seconds / (60 * 60)) % 24,
+			(seconds / 60) % 60,
+			seconds % 60);
+	}
+}
+
+/****************************************************************************/
+
 /*
  * This function will be called for any incoming DHCP responses
  */
@@ -1195,31 +1234,7 @@ dhcp_input(const struct ether_header * eframe,
 				{
 					uint32_t seconds = ntohl(*(uint32_t *)option_data);
 
-					if(seconds < 60)
-					{
-						strcpy(text_buffer,"");
-					}
-					else if (seconds < 60 * 60)
-					{
-						snprintf(text_buffer,sizeof(text_buffer)," (%u:%02u minutes)",
-							seconds / 60,
-							seconds % 60);
-					}
-					else if (seconds < 24 * 60 * 60)
-					{
-						snprintf(text_buffer,sizeof(text_buffer)," (%u:%02u:%02u hours)",
-							seconds / (60 * 60),
-							(seconds / 60) % 60,
-							seconds % 60);
-					}
-					else
-					{
-						snprintf(text_buffer,sizeof(text_buffer)," (%u:%02u:%02u:%02u days)",
-							seconds / (24 * 60 * 60),
-							(seconds / (60 * 60)) % 24,
-							(seconds / 60) % 60,
-							seconds % 60);
-					}
+					convert_seconds_to_readable_form(seconds,text_buffer,sizeof(text_buffer));
 
 					add_dhcp_option(server_data,"ip-address-lease-time","%u seconds%s",seconds,text_buffer);
 				}
@@ -1287,6 +1302,34 @@ dhcp_input(const struct ether_header * eframe,
 
 				if(option_length >= 4)
 					add_dhcp_option(server_data,"maximum-dhcp-message-size","%u",ntohs(*(uint16_t *)option_data));
+
+				break;
+
+			/* Renewal time value */
+			case OPTION_TYPE_RENEWAL_TIME:
+
+				if(option_length >= 4)
+				{
+					uint32_t seconds = ntohl(*(uint32_t *)option_data);
+
+					convert_seconds_to_readable_form(seconds,text_buffer,sizeof(text_buffer));
+
+					add_dhcp_option(server_data,"renewal-time","%u seconds%s",seconds,text_buffer);
+				}
+
+				break;
+
+			/* Rebinding time value */
+			case OPTION_TYPE_REBINDING_TIME:
+
+				if(option_length >= 4)
+				{
+					uint32_t seconds = ntohl(*(uint32_t *)option_data);
+
+					convert_seconds_to_readable_form(seconds,text_buffer,sizeof(text_buffer));
+
+					add_dhcp_option(server_data,"rebinding-time","%u seconds%s",seconds,text_buffer);
+				}
 
 				break;
 
@@ -1676,19 +1719,27 @@ fill_dhcp_discover_options(bootp_t *dhcp, int interface_mtu)
 		OPTION_TYPE_GATEWAY,
 		OPTION_TYPE_DNS,
 		OPTION_TYPE_DOMAIN_NAME,
-		OPTION_TYPE_DOMAIN_SEARCH,
+		OPTION_TYPE_INTERFACE_MTU,
+		OPTION_TYPE_BROADCAST_ADDRESS,
+		OPTION_TYPE_PERFORM_ROUTER_DISCOVERY,
 		OPTION_TYPE_STATIC_ROUTE,
-		OPTION_TYPE_CLASSLESS_STATIC_ROUTE,
-		OPTION_TYPE_PROXY_AUTODISCOVERY,
-		OPTION_TYPE_LDAP_URL,
+		OPTION_TYPE_NTP_SERVERS,
 		OPTION_TYPE_NETBIOS_OVER_TCP_IP_NAME_SERVER,
 		OPTION_TYPE_NETBIOS_OVER_TCP_IP_NODE_TYPE,
 		OPTION_TYPE_NETBIOS_OVER_TCP_IP_SCOPE,
-		OPTION_TYPE_PERFORM_ROUTER_DISCOVERY,
-		OPTION_TYPE_INTERFACE_MTU,
-		OPTION_TYPE_NTP_SERVERS,
-		OPTION_TYPE_BROADCAST_ADDRESS,
-		OPTION_TYPE_AUTO_CONFIGURE
+		OPTION_TYPE_IP_ADDRESS_LEASE_TIME,
+		OPTION_TYPE_DHCP_MESSAGE_TYPE,
+		OPTION_TYPE_SERVER_IDENTIFIER,
+		OPTION_TYPE_PARAMETER_REQUEST_LIST,
+		OPTION_TYPE_MESSAGE,
+		OPTION_TYPE_MAXIMUM_DHCP_MESSAGE_SIZE,
+		OPTION_TYPE_RENEWAL_TIME,
+		OPTION_TYPE_REBINDING_TIME,
+		OPTION_TYPE_LDAP_URL,
+		OPTION_TYPE_AUTO_CONFIGURE,
+		OPTION_TYPE_DOMAIN_SEARCH,
+		OPTION_TYPE_CLASSLESS_STATIC_ROUTE,
+		OPTION_TYPE_PROXY_AUTODISCOVERY
 	};
 
 	uint8_t message_type;
