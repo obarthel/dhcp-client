@@ -639,11 +639,9 @@ get_dhcp_message_type(const uint8_t * vendor_options,int vendor_options_length)
 		if(option_type == OPTION_TYPE_END || pos == vendor_options_length)
 			break;
 
-		/* We abort when finding zero length options (should not be there) or
-		 * when we reach the end of the option buffer.
-		 */
+		/* We stop when we reach the end of the option buffer. */
 		option_length = vendor_options[pos++];
-		if(option_length == 0 || pos == vendor_options_length)
+		if(pos == vendor_options_length)
 			break;
 
 		if(option_type == OPTION_TYPE_DHCP_MESSAGE_TYPE)
@@ -654,100 +652,6 @@ get_dhcp_message_type(const uint8_t * vendor_options,int vendor_options_length)
 
 		pos += option_length;
 	}
-
-	return(result);
-}
-
-/****************************************************************************/
-
-/* Decode a domain name stored in a DNS record, decompressing it as
- * necessary (RFC 1035, section 4.1.4).
- */
-static int decode_dns_name(
-	const uint8_t *	buf,
-	int				pos,
-	int				buf_size,
-	char *			name,
-	size_t			name_size)
-{
-	int compression;
-	int result = -1;
-	int len,i,n;
-
-	/* Check if the parameters make sense. */
-	if((name != NULL && name_size == 0) || pos > buf_size)
-		goto out;
-
-	/* One off for the terminating NUL byte. */
-	name_size--;
-
-	i = n = 0;
-
-	/* The strings are stored in sections with length
-	 * bytes introducing each. These sections are
-	 * so-called "labels" and they are strung together
-	 * with "." characters.
-	 */
-	while((len = buf[pos + (i++)]) > 0)
-	{
-		/* Is this section compressed? */
-		compression = len & 0xc0;
-		if(compression == 0)
-		{
-			/* Doesn't look like it. Copy it as it is. */
-			if(name != NULL)
-			{
-				/* Add a '.' between labels. */
-				if(n > 0)
-				{
-					/* Still enough room left in the buffer? */
-					if(n + 1 >= (int)name_size)
-						goto out;
-
-					name[n++] = '.';
-				}
-
-				/* Still enough room left in the buffer? */
-				if(n + len >= (int)name_size)
-					goto out;
-
-				memmove(&name[n],&buf[pos + i],len);
-			}
-
-			n += len;
-			i += len;
-		}
-		else if (compression == 0xc0)
-		{
-			/* So this is a compressed chunk. The length
-			 * field and the next byte point to where the
-			 * label text continues. Or points to more
-			 * compressed text...
-			 */
-			pos = ((len & ~0xc0) << 8) | buf[pos + (i++)];
-			if(pos >= buf_size)
-				goto out;
-
-			i = 0;
-		}
-		else
-		{
-			/* Unsupported encoding scheme for labels. */
-			goto out;
-		}
-
-		/* Did we read too much data already? */
-		if(pos + i >= buf_size)
-			goto out;
-	}
-
-	/* Provide for NUL-termination of the full name. */
-	if(name != NULL)
-		name[n] = '\0';
-
-	result = 0;
-
- out:
 
 	return(result);
 }
@@ -974,25 +878,285 @@ convert_seconds_to_readable_form(uint32_t seconds,char * buffer,size_t buffer_si
 	}
 	else if (seconds < 60 * 60)
 	{
-		snprintf(buffer,buffer_size," (%u:%02u minutes)",
-			seconds / 60,
+		int minutes = seconds / 60;
+
+		snprintf(buffer,buffer_size,minutes > 1 ? " (%u:%02u minutes)" : " (%u:%02u minute)",
+			minutes,
 			seconds % 60);
 	}
 	else if (seconds < 24 * 60 * 60)
 	{
-		snprintf(buffer,buffer_size," (%u:%02u:%02u hours)",
-			seconds / (60 * 60),
+		int hours = seconds / (60 * 60);
+
+		snprintf(buffer,buffer_size,hours > 1 ? " (%u:%02u:%02u hours)" : " (%u:%02u:%02u hour)",
+			hours,
 			(seconds / 60) % 60,
 			seconds % 60);
 	}
 	else
 	{
-		snprintf(buffer,buffer_size," (%u:%02u:%02u:%02u days)",
-			seconds / (24 * 60 * 60),
+		int days = seconds / (24 * 60 * 60);
+
+		snprintf(buffer,buffer_size,days > 1 ? " (%u:%02u:%02u:%02u days)" : " (%u:%02u:%02u:%02u day)",
+			days,
 			(seconds / (60 * 60)) % 24,
 			(seconds / 60) % 60,
 			seconds % 60);
 	}
+}
+
+/****************************************************************************/
+
+static bool
+fill_aggregate_buffer_from_option(const uint8_t * vendor_options,int vendor_options_length,
+	int aggregate_option_type, uint8_t ** aggregate_buffer_ptr,size_t * aggregate_buffer_size_ptr)
+{
+	bool option_data_found = false;
+	uint8_t * aggregate_buffer = NULL;
+	size_t required_size = 0;
+	int option_type;
+	int option_length;
+	int output_pos;
+	int read_pos;
+	
+	assert( 0 < aggregate_option_type && aggregate_option_type < 255 );
+	assert( aggregate_buffer_ptr != NULL );
+	assert( aggregate_buffer_size_ptr != NULL );
+
+	/* Find out how much memory is required to store all
+	 * the data for a specific option type.
+	 */
+	for(read_pos = 0 ; read_pos < vendor_options_length ; (void)NULL)
+	{
+		option_type = vendor_options[read_pos++];
+
+		/* Skip the padding octet. */
+		if(option_type == OPTION_TYPE_PAD)
+			continue;
+
+		/* Stop at the end marker, or the end of the options buffer. */
+		if(option_type == OPTION_TYPE_END || read_pos == vendor_options_length)
+			break;
+
+		option_length = vendor_options[read_pos++];
+
+		/* Stop at the end of the options buffer. */
+		if(read_pos == vendor_options_length)
+			break;
+		
+		if(option_type == aggregate_option_type)
+			required_size += option_length;
+	}
+
+	if(required_size == 0)
+		goto out;
+
+	aggregate_buffer = malloc(required_size);
+	if(aggregate_buffer == NULL)
+		goto out;
+	
+	(*aggregate_buffer_ptr) = aggregate_buffer;
+	(*aggregate_buffer_size_ptr) = required_size;
+	
+	for(read_pos = output_pos = 0 ; read_pos < vendor_options_length ; (void)NULL)
+	{
+		option_type = vendor_options[read_pos++];
+
+		/* Skip the padding octet. */
+		if(option_type == OPTION_TYPE_PAD)
+			continue;
+
+		/* Stop at the end marker, or the end of the options buffer. */
+		if(option_type == OPTION_TYPE_END || read_pos == vendor_options_length)
+			break;
+
+		option_length = vendor_options[read_pos++];
+
+		/* Stop at the end of the options buffer. */
+		if(read_pos == vendor_options_length)
+			break;
+		
+		if(option_type == aggregate_option_type)
+		{
+			assert( output_pos + option_length <= (int)required_size );
+			
+			memmove(&aggregate_buffer[output_pos],&vendor_options[read_pos],option_length);
+
+			read_pos += option_length;
+			output_pos += option_length;
+		}
+	}
+	
+	option_data_found = true;
+	
+ out:
+	
+	return(option_data_found);
+}
+
+/****************************************************************************/
+
+static size_t
+get_domain_name_size(uint8_t * buffer,size_t buffer_size)
+{
+	int length,compression;
+	size_t pos;
+	
+	for(pos = 0 ; pos < buffer_size ; (void)NULL)
+	{
+		length = buffer[pos++];
+		if(length == 0 || pos == buffer_size)
+			break;
+		
+		compression = length & 0xc0;
+		if (compression == 0)
+		{
+			pos += length;
+		}
+		else if (compression == 0xc0)
+		{
+			if(pos == buffer_size)
+				break;
+			
+			pos++;
+			break;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	return(pos);
+}
+
+/****************************************************************************/
+
+/* Decode a domain name stored in a DNS record, decompressing it as
+ * necessary (RFC 1035, section 4.1.4).
+ */
+static size_t
+decode_domain_name(uint8_t * input_buffer,size_t input_buffer_size,size_t input_pos,char * output_buffer,size_t output_buffer_size)
+{
+	int length,compression;
+	size_t output_pos = 0;
+
+	assert( output_buffer_size > 0 );
+	
+	while(input_pos < input_buffer_size)
+	{
+		length = input_buffer[input_pos++];
+		if(length == 0 || input_pos == input_buffer_size)
+			break;
+		
+		compression = length & 0xc0;
+		if (compression == 0)
+		{
+			if(output_pos + length + 1 >= output_buffer_size)
+				break;
+
+			memmove(&output_buffer[output_pos],&input_buffer[input_pos],length);
+			output_pos += length;
+			
+			output_buffer[output_pos++] = '.';
+			
+			input_pos += length;
+		}
+		else if (compression == 0xc0)
+		{
+			size_t pointer;
+			
+			if(input_pos == input_buffer_size)
+				break;
+			
+			pointer = ((length & ~0xc0) << 8) | input_buffer[input_pos++];
+			
+			if(pointer >= input_buffer_size)
+				break;
+			
+			input_pos = pointer;
+		}
+		else
+		{
+			break;
+		}
+	}
+
+	/* If we have a domain name, it will trail the
+	 * '.' character, indicating that no label
+	 * follows (root). We remove it.
+	 */
+	if(output_pos > 0)
+		output_pos--;
+
+	assert( output_pos < output_buffer_size );
+	output_buffer[output_pos] = '\0';
+	
+	return(output_pos);
+}
+
+/****************************************************************************/
+
+static bool
+decode_domain_search(const uint8_t * vendor_options,int vendor_options_length,int aggregate_option_type,char * buffer,size_t buffer_size)
+{
+	char * domain_name_buffer;
+	size_t domain_name_buffer_size = vendor_options_length+1;
+	size_t domain_name_length;
+	uint8_t * aggregate_buffer = NULL;
+	size_t aggregate_buffer_size = 0;
+	bool found = false;
+	size_t buffer_pos = 0;
+	size_t pos;
+	size_t encoded_domain_size;
+
+	assert( buffer != NULL );
+	assert( buffer_size > 0 );
+	
+	domain_name_buffer = malloc(domain_name_buffer_size);
+	if(domain_name_buffer == NULL)
+		goto out;
+
+	if(!fill_aggregate_buffer_from_option(vendor_options,vendor_options_length,aggregate_option_type,&aggregate_buffer,&aggregate_buffer_size))
+		goto out;
+
+	for(pos = 0 ; pos < aggregate_buffer_size ; pos += encoded_domain_size)
+	{
+		encoded_domain_size = get_domain_name_size(&aggregate_buffer[pos],aggregate_buffer_size - pos);
+		if(encoded_domain_size == 0)
+			break;
+		
+		domain_name_length = decode_domain_name(aggregate_buffer,aggregate_buffer_size,pos,domain_name_buffer,domain_name_buffer_size);
+		if(domain_name_length > 0)
+		{
+			if(buffer_pos > 0 && buffer_pos + 2 < buffer_size)
+			{
+				buffer[buffer_pos++] = ',';
+				buffer[buffer_pos++] = ' ';
+			}
+			
+			if(buffer_pos + domain_name_length < buffer_size)
+			{
+				memmove(&buffer[buffer_pos],domain_name_buffer,domain_name_length);
+				buffer_pos += domain_name_length;
+			}
+		}
+	}
+	
+	found = true;
+	
+ out:
+
+	if(buffer_pos < buffer_size)
+		buffer[buffer_pos] = '\0';
+	
+	if(domain_name_buffer != NULL)
+		free(domain_name_buffer);
+
+	if(aggregate_buffer != NULL)
+		free(aggregate_buffer);
+
+	return(found);
 }
 
 /****************************************************************************/
@@ -1008,6 +1172,7 @@ dhcp_input(const struct ether_header * eframe,
 	uint32_t transaction_id,
 	int length)
 {
+	uint8_t ignore_option[256 / 8];
 	ip4_t server_address;
 	ip4_t ipv4_address;
 	const uint8_t * vendor_options;
@@ -1025,6 +1190,9 @@ dhcp_input(const struct ether_header * eframe,
 	uint32_t aligned_buffer[256 / sizeof(uint32_t)+1];
 	uint8_t * option_data = (uint8_t *)aligned_buffer;
 	struct dhcp_server_response_data * server_data;
+
+	/* We ignore no vendor option yet. */
+	memset(ignore_option,0,sizeof(ignore_option));
 
 	vendor_options = dhcp->vend;
 	vendor_options_length = length - offsetof(bootp_t,vend);
@@ -1170,11 +1338,9 @@ dhcp_input(const struct ether_header * eframe,
 		if(option_type == OPTION_TYPE_END || pos == vendor_options_length)
 			break;
 
-		/* Stop at zero length options (should not be there), or the
-		 * end of the options buffer.
-		 */
+		/* Stop at the end of the options buffer. */
 		option_length = vendor_options[pos++];
-		if(option_length == 0 || pos == vendor_options_length)
+		if(pos == vendor_options_length)
 			break;
 
 		/* Move the option data to a 32-bit word aligned buffer for
@@ -1184,6 +1350,10 @@ dhcp_input(const struct ether_header * eframe,
 		option_data[option_length] = '\0';
 
 		pos += option_length;
+
+		/* Ignore this option? */
+		if(ignore_option[option_type / 8] & (1 << (option_type % 8)))
+			continue;
 
 		switch(option_type)
 		{
@@ -1350,7 +1520,14 @@ dhcp_input(const struct ether_header * eframe,
 			/* Domain search (RFC 3397) */
 			case OPTION_TYPE_DOMAIN_SEARCH:
 
-				if(decode_dns_name(option_data, 0, option_length, text_buffer, sizeof(text_buffer)) > 0)
+				/* The data used by this option can be spread across
+				 * several options. We aggregate them and then decode
+				 * them all in one step. This is why we process this
+				 * option only once.
+				 */
+				ignore_option[option_type / 8] |= (1 << (option_type % 8));
+
+				if(decode_domain_search(vendor_options,vendor_options_length,option_type,text_buffer, sizeof(text_buffer)))
 					add_dhcp_option(server_data,"domain-search","%s",text_buffer);
 
 				break;
