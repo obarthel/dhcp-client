@@ -907,6 +907,14 @@ convert_seconds_to_readable_form(uint32_t seconds,char * buffer,size_t buffer_si
 
 /****************************************************************************/
 
+/* Search for DHCP options of a specific type, aggregating their data into
+ * a single consecutive memory buffer. Returns true if any DHCP options
+ * could be found and a buffer was allocated for them, false otherwise.
+ * The buffer allocated must be freed eventually.
+ *
+ * Aggregated option data is described in RFC 3396 ("Encoding long options
+ * in the Dynamic Host Configuration Protocol (DHCPv4)").
+ */
 static bool
 fill_aggregate_buffer_from_option(const uint8_t * vendor_options,int vendor_options_length,
 	int aggregate_option_type, uint8_t ** aggregate_buffer_ptr,size_t * aggregate_buffer_size_ptr)
@@ -948,9 +956,14 @@ fill_aggregate_buffer_from_option(const uint8_t * vendor_options,int vendor_opti
 			required_size += option_length;
 	}
 
+	/* No option data found? Then we have failed... */
 	if(required_size == 0)
 		goto out;
 
+	/* Allocate memory for storing the aggregated data in.
+	 * The buffer address and how much memory was allocated
+	 * will be provided to the caller.
+	 */
 	aggregate_buffer = malloc(required_size);
 	if(aggregate_buffer == NULL)
 		goto out;
@@ -996,112 +1009,168 @@ fill_aggregate_buffer_from_option(const uint8_t * vendor_options,int vendor_opti
 
 /****************************************************************************/
 
+/* Find out how much space is required for storing a complete,
+ * encoded domain name. The name either ends with a root marker
+ * or a compression pointer (RFC 1035, section 4.1.4). Returns
+ * number of octets used or 0 for buffer overflow/encoding
+ * error.
+ */
 static size_t
-get_domain_name_size(uint8_t * buffer,size_t buffer_size)
+get_domain_name_size(const uint8_t * buffer,size_t buffer_size)
 {
 	int length,compression;
+	size_t result = 0;
 	size_t pos;
 	
 	for(pos = 0 ; pos < buffer_size ; (void)NULL)
 	{
 		length = buffer[pos++];
-		if(length == 0 || pos == buffer_size)
+		if(length == 0)
 			break;
-		
+
+		/* A label begins with a length field which
+		 * could also be a compression pointer.
+		 */
 		compression = length & 0xc0;
+
+		/* Is this a length field? */
 		if (compression == 0)
 		{
+			/* Check for buffer overflow. */
+			if(pos + length > buffer_size)
+				goto out;
+
 			pos += length;
 		}
+		/* Is this a compression pointer? */
 		else if (compression == 0xc0)
 		{
+			/* Check for buffer overflow. */
 			if(pos == buffer_size)
-				break;
-			
+				goto out;
+
+			/* Domain name continues where the
+			 * compression pointer leads to.
+			 */
 			pos++;
 			break;
 		}
+		/* Undefined encoding scheme. */
 		else
 		{
-			break;
+			goto out;
 		}
 	}
 
-	return(pos);
+	result = pos;
+
+ out:
+
+	return(result);
 }
 
 /****************************************************************************/
 
 /* Decode a domain name stored in a DNS record, decompressing it as
- * necessary (RFC 1035, section 4.1.4).
+ * necessary (RFC 1035, section 4.1.4). Returns the length of the
+ * decoded domain name or 0 for decoding error.
  */
 static size_t
-decode_domain_name(uint8_t * input_buffer,size_t input_buffer_size,size_t input_pos,char * output_buffer,size_t output_buffer_size)
+decode_domain_name(const uint8_t * input_buffer,size_t input_buffer_size,size_t input_pos,
+	char * output_buffer,size_t output_buffer_size)
 {
 	int length,compression;
 	size_t output_pos = 0;
+	size_t result = 0;
 
 	assert( output_buffer_size > 0 );
 	
 	while(input_pos < input_buffer_size)
 	{
 		length = input_buffer[input_pos++];
-		if(length == 0 || input_pos == input_buffer_size)
+		if(length == 0)
 			break;
 		
+		/* A label begins with a length field which
+		 * could also be a compression pointer.
+		 */
 		compression = length & 0xc0;
+
+		/* Is this a length field? */
 		if (compression == 0)
 		{
-			if(output_pos + length + 1 >= output_buffer_size)
-				break;
+			/* Check for buffer overflow. */
+			if(input_pos + length > input_buffer_size)
+				goto out;
 
-			memmove(&output_buffer[output_pos],&input_buffer[input_pos],length);
-			output_pos += length;
-			
-			output_buffer[output_pos++] = '.';
+			/* Append the label to the output buffer if there is room. */
+			if(output_pos + length + 1 < output_buffer_size)
+			{
+				/* Add the label separator if there already is a
+				 * label in the output buffer.
+				 */
+				if(output_pos > 0)
+					output_buffer[output_pos++] = '.';
+
+				memmove(&output_buffer[output_pos],&input_buffer[input_pos],length);
+				output_pos += length;
+			}
 			
 			input_pos += length;
 		}
+		/* Is this a compression pointer? */
 		else if (compression == 0xc0)
 		{
 			size_t pointer;
 			
+			/* Check for buffer overflow. */
 			if(input_pos == input_buffer_size)
-				break;
+				goto out;
 			
 			pointer = ((length & ~0xc0) << 8) | input_buffer[input_pos++];
 			
+			/* Check for buffer overflow. */
 			if(pointer >= input_buffer_size)
-				break;
-			
+				goto out;
+
+			/* Domain name continues where the compression
+			 * pointer leads.
+			 */
 			input_pos = pointer;
 		}
+		/* Undefined encoding scheme. */
 		else
 		{
-			break;
+			goto out;
 		}
 	}
 
-	/* If we have a domain name, it will trail the
-	 * '.' character, indicating that no label
-	 * follows (root). We remove it.
-	 */
-	if(output_pos > 0)
-		output_pos--;
-
 	assert( output_pos < output_buffer_size );
 	output_buffer[output_pos] = '\0';
+
+	result = output_pos;
+
+ out:
 	
-	return(output_pos);
+	return(result);
 }
 
 /****************************************************************************/
 
+/* Decode DHCP option 119 (Domain search, RFC 3397). The domain data may
+ * be broken up into several DHCP data options (RFC 3396) which first
+ * need to be aggregated. Returns true if the data could be decoded,
+ * false otherwise.
+ */
 static bool
-decode_domain_search(const uint8_t * vendor_options,int vendor_options_length,int aggregate_option_type,char * buffer,size_t buffer_size)
+decode_domain_search(const uint8_t * vendor_options,int vendor_options_length,
+	int aggregate_option_type,char * buffer,size_t buffer_size)
 {
-	char * domain_name_buffer;
-	size_t domain_name_buffer_size = vendor_options_length+1;
+	/* The maximum length of a domain name, including "." separators,
+	 * would be 255 characters (RFC 2181, section 11 "Name syntax").
+	 * Space is reserved for the terminating NUL byte, too.
+	 */
+	char domain_name_buffer[256];
 	size_t domain_name_length;
 	uint8_t * aggregate_buffer = NULL;
 	size_t aggregate_buffer_size = 0;
@@ -1112,29 +1181,36 @@ decode_domain_search(const uint8_t * vendor_options,int vendor_options_length,in
 
 	assert( buffer != NULL );
 	assert( buffer_size > 0 );
-	
-	domain_name_buffer = malloc(domain_name_buffer_size);
-	if(domain_name_buffer == NULL)
+
+	/* Aggregate all option 119 data. */
+	if(!fill_aggregate_buffer_from_option(vendor_options,vendor_options_length,
+			aggregate_option_type,&aggregate_buffer,&aggregate_buffer_size))
 		goto out;
 
-	if(!fill_aggregate_buffer_from_option(vendor_options,vendor_options_length,aggregate_option_type,&aggregate_buffer,&aggregate_buffer_size))
-		goto out;
-
+	/* Process the aggregated data, decoding each domain name stored. */
 	for(pos = 0 ; pos < aggregate_buffer_size ; pos += encoded_domain_size)
 	{
+		/* How much room will this encoded domain name take up? */
 		encoded_domain_size = get_domain_name_size(&aggregate_buffer[pos],aggregate_buffer_size - pos);
 		if(encoded_domain_size == 0)
 			break;
-		
-		domain_name_length = decode_domain_name(aggregate_buffer,aggregate_buffer_size,pos,domain_name_buffer,domain_name_buffer_size);
+
+		/* Attempt to decode this domain name. */
+		domain_name_length = decode_domain_name(aggregate_buffer,aggregate_buffer_size,pos,
+			domain_name_buffer,sizeof(domain_name_buffer));
+
 		if(domain_name_length > 0)
 		{
+			/* If there is more than one domain name in the output buffer
+			 * already, add a separator.
+			 */
 			if(buffer_pos > 0 && buffer_pos + 2 < buffer_size)
 			{
 				buffer[buffer_pos++] = ',';
 				buffer[buffer_pos++] = ' ';
 			}
-			
+
+			/* Add the decoded domain name, if there is stil room. */
 			if(buffer_pos + domain_name_length < buffer_size)
 			{
 				memmove(&buffer[buffer_pos],domain_name_buffer,domain_name_length);
@@ -1147,12 +1223,13 @@ decode_domain_search(const uint8_t * vendor_options,int vendor_options_length,in
 	
  out:
 
+	/* Provide NUL termination for the output buffer. */
 	if(buffer_pos < buffer_size)
 		buffer[buffer_pos] = '\0';
-	
-	if(domain_name_buffer != NULL)
-		free(domain_name_buffer);
 
+	/* Free the memory which we allocated for the
+	 * aggregated option 119 data.
+	 */
 	if(aggregate_buffer != NULL)
 		free(aggregate_buffer);
 
