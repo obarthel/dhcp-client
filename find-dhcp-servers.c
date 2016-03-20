@@ -1774,7 +1774,7 @@ udp_input(const struct ether_header *eframe,struct ip * ip_packet,const struct u
 
 		length = ntohs(udp_packet->uh_ulen) - sizeof(struct udphdr);
 
-		dhcp_input(eframe,ip_packet,udp_packet,(bootp_t *)((char *)udp_packet + sizeof(struct udphdr)),transaction_id,length);
+		dhcp_input(eframe,ip_packet,udp_packet,(bootp_t *)&udp_packet[1],transaction_id,length);
 	}
 }
 
@@ -1791,7 +1791,24 @@ ip_input(const struct ether_header *eframe,struct ip * ip_packet,uint32_t transa
 	
 	/* Care only about UDP - since DHCP sits over UDP */
 	if ((opt_ignore_checksums || checksum == 0) && ip_packet->ip_p == IPPROTO_UDP)
-		udp_input(eframe,ip_packet,(struct udphdr *)((char *)ip_packet + sizeof(struct ip)),transaction_id);
+		udp_input(eframe,ip_packet,(struct udphdr *)&ip_packet[1],transaction_id);
+}
+
+/****************************************************************************/
+
+/* Check if this Ethernet frame was sent for us to process. This means it either
+ * was sent to the broadcast address group or it was sent to the address of the
+ * interface which we are listening to.
+ */
+static bool
+is_ethernet_frame_for_us(const struct ether_header *ethernet_frame)
+{
+	bool result;
+
+	result = (memcmp(ethernet_frame->ether_dhost,client_mac_address,ETHER_ADDR_LEN) == 0 ||
+			  memcmp(ethernet_frame->ether_dhost,broadcast_mac_address,ETHER_ADDR_LEN) == 0);
+
+	return(result);
 }
 
 /****************************************************************************/
@@ -1800,19 +1817,16 @@ ip_input(const struct ether_header *eframe,struct ip * ip_packet,uint32_t transa
  * Ethernet packet handler
  */
 static void
-ether_input(u_char *args __attribute__((unused)), const struct pcap_pkthdr *header __attribute__((unused)), const u_char *frame)
+ether_input(uint8_t *args __attribute__((unused)), const struct pcap_pkthdr *header __attribute__((unused)), const uint8_t *frame)
 {
-	const struct ether_header *eframe = (struct ether_header *)frame;
+	const struct ether_header *ethernet_frame = (struct ether_header *)frame;
 
 	/* This must be an Ethernet frame (not ARP), and the destination address must
 	 * either refer to the network interface we listen to or it must be
 	 * the broadcast group address.
 	 */
-	if (htons(eframe->ether_type) == ETHERTYPE_IP && (memcmp(eframe->ether_dhost,client_mac_address,ETHER_ADDR_LEN) == 0 ||
-													  memcmp(eframe->ether_dhost,broadcast_mac_address,ETHER_ADDR_LEN) == 0))
-	{
-		ip_input(eframe,(struct ip *)(frame + sizeof(struct ether_header)),transaction_id);
-	}
+	if (htons(ethernet_frame->ether_type) == ETHERTYPE_IP && is_ethernet_frame_for_us(ethernet_frame))
+		ip_input(ethernet_frame,(struct ip *)&ethernet_frame[1],transaction_id);
 }
 
 /****************************************************************************/
@@ -1821,12 +1835,12 @@ ether_input(u_char *args __attribute__((unused)), const struct pcap_pkthdr *head
  * Ethernet output handler - Fills appropriate bytes in ethernet header
  */
 static int
-ether_output(pcap_t *pcap_handle,const u_char *frame, const uint8_t *client_mac_address, int len)
+ether_output(pcap_t *pcap_handle,const uint8_t *frame, const uint8_t *client_mac_address, int len)
 {
 	struct ether_header *eframe = (struct ether_header *)frame;
 	int result;
 
-	len += sizeof(struct ether_header);
+	len += sizeof(*eframe);
 
 	memmove(eframe->ether_shost, client_mac_address, ETHER_ADDR_LEN);
 	memmove(eframe->ether_dhost, broadcast_mac_address, ETHER_ADDR_LEN);
@@ -2028,7 +2042,14 @@ static int
 dhcp_discover(pcap_t *pcap_handle, const uint8_t *client_mac_address, int interface_mtu, uint32_t transaction_id, bool use_broadcast)
 {
 	int len;
-	char packet[512];
+	/* The packet to be built includes the Ethernet header. There
+	 * must be room for up to 576 octets, which will be filled by
+	 * the IP header, the UDP header and the DHCP message. This
+	 * should not add up to more than 576 octets, which is the
+	 * minimum a DHCP server is required to receive and process
+	 * (RFC 2131, section 2).
+	 */
+	uint8_t packet[sizeof(struct ether_header)+576];
 	struct udphdr *udp_header;
 	struct ip *ip_header;
 	bootp_t *dhcp;
@@ -2038,9 +2059,9 @@ dhcp_discover(pcap_t *pcap_handle, const uint8_t *client_mac_address, int interf
 
 	memset(packet,0,sizeof(packet));
 
-	ip_header = (struct ip *)(packet + sizeof(struct ether_header));
-	udp_header = (struct udphdr *)(((char *)ip_header) + sizeof(struct ip));
-	dhcp = (bootp_t *)(((char *)udp_header) + sizeof(struct udphdr));
+	ip_header = (struct ip *)&packet[sizeof(struct ether_header)];
+	udp_header = (struct udphdr *)&ip_header[1];
+	dhcp = (bootp_t *)&udp_header[1];
 
 	len = fill_dhcp_discover_options(dhcp, interface_mtu);
 
@@ -2051,17 +2072,19 @@ dhcp_discover(pcap_t *pcap_handle, const uint8_t *client_mac_address, int interf
 	 * DHCP messages shorter than 300 octets. In practice DHCP servers (not
 	 * just relay servers, mind you) may ignore DHCP messages shorter than 300
 	 * octets altogether.
+	 *
+	 * Note that the 300 octets do not include the IP and UDP headers, which
+	 * add another 28 octets on top.
 	 */
-	if(sizeof(*ip_header) + sizeof(*udp_header) + len < 300)
-		len = 300 - (sizeof(*ip_header) + sizeof(*udp_header));
+	if(len < 300)
+		len = 300;
+
+	assert( sizeof(struct ether_header) + sizeof(*ip_header) + sizeof(*udp_header) + len <= (int)sizeof(packet) );
 
 	len = udp_output(ip_header, src_address, dst_address, udp_header, len);
 	len = ip_output(ip_header, src_address, dst_address, len);
 
-	assert( len <= (int)sizeof(packet) );
-	assert( len >= 300 );
-
-	result = ether_output(pcap_handle,(u_char *)packet, client_mac_address, len);
+	result = ether_output(pcap_handle,packet, client_mac_address, len);
 
 	return result;
 }
